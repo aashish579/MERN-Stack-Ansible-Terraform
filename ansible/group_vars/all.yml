@@ -1,0 +1,9 @@
+---
+application_repo: "https://github.com/UnpredictablePrashant/TravelMemory.git"
+application_git_version: "main"
+application_base: "/opt/travelmemory"
+app_user: "travelmemory"
+backend_port: 3001
+mongo_db_name: "travelmemory"
+mongo_admin_user: "tm_admin"
+mongo_app_user: "tm_app"

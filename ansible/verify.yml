@@ -1,0 +1,83 @@
+---
+- name: Verify public web server services and API
+  hosts: web
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Confirm backend and Nginx service states
+      ansible.builtin.command: "systemctl is-active {{ item }}"
+      loop:
+        - nginx
+        - travelmemory
+      register: service_states
+      changed_when: false
+
+    - name: Confirm local HTTP API and MongoDB health
+      ansible.builtin.uri:
+        url: http://127.0.0.1/health
+        method: GET
+        status_code: 200
+      changed_when: false
+
+    - name: Check Node.js version
+      ansible.builtin.command: node --version
+      register: node_version
+      changed_when: false
+
+    - name: Show safe web verification evidence
+      ansible.builtin.debug:
+        msg: "Nginx, backend, and API health are working. Node version: {{ node_version.stdout }}"
+
+- name: Verify private MongoDB and access control
+  hosts: database
+  become: true
+  gather_facts: false
+  vars_files:
+    - ../generated/secrets.yml
+  tasks:
+    - name: Check MongoDB systemd service
+      ansible.builtin.command: systemctl is-active mongod
+      changed_when: false
+
+    - name: Fetch number of stored trips using authorized app database user
+      ansible.builtin.command:
+        argv:
+          - mongosh
+          - --quiet
+          - --host
+          - 127.0.0.1
+          - --username
+          - "{{ mongo_app_user }}"
+          - --password
+          - "{{ mongo_app_password }}"
+          - --authenticationDatabase
+          - "{{ mongo_db_name }}"
+          - --eval
+          - "db.getSiblingDB('{{ mongo_db_name }}').getCollection('trips').countDocuments({})"
+      register: trip_count
+      changed_when: false
+      no_log: true
+
+    - name: Show authorized trip count without credentials
+      ansible.builtin.debug:
+        msg: "Authorized MongoDB query succeeded. Stored trip documents: {{ trip_count.stdout | trim }}"
+
+    - name: Attempt unauthenticated database read (must fail)
+      ansible.builtin.command:
+        argv:
+          - mongosh
+          - --quiet
+          - --host
+          - 127.0.0.1
+          - --eval
+          - "db.getSiblingDB('{{ mongo_db_name }}').getCollection('trips').findOne()"
+      register: unauthorized_attempt
+      changed_when: false
+      failed_when: false
+
+    - name: Assert anonymous MongoDB reads are rejected
+      ansible.builtin.assert:
+        that:
+          - unauthorized_attempt.rc != 0
+        success_msg: "Unauthenticated MongoDB read rejected; access control is active"
+        fail_msg: "SECURITY FAILURE: MongoDB allowed an unauthenticated read"

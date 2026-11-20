@@ -1,0 +1,56 @@
+# Terraform local state, plans and secrets
+**/.terraform/
+**/terraform.tfstate
+**/terraform.tfstate.*
+**/terraform.tfvars
+**/*.auto.tfvars
+**/tfplan
+**/tfplan.*
+**/crash.log
+**/crash.*.log
+# generated SSH inventory and Vault credentials
+generated/
+# credentials and build artifacts
+*.pem
+*.p12
+*.key
+.env
+.env.*
+!*.env.example
+!**/*.env.example
+*.log
+*.retry
+**/node_modules/
+**/build/
+__pycache__/
+*.pyc
+.DS_Store
+# Preserve screenshots for final submission, but hide logs unless reviewed
+evidence/logs/*
+!evidence/logs/.gitkeep
+
+# Secrets and generated configuration
+generated/
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+*.tfvars
+*.tfvars.json
+
+# Terraform state and temporary files
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan*
+crash.log
+
+# Dependencies and build outputs
+node_modules/
+dist/
+build/
+
+# Ansible temporary files
+*.retry

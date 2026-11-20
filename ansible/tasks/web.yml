@@ -1,0 +1,269 @@
+---
+- name: Install web server prerequisites
+  ansible.builtin.apt:
+    name:
+      - curl
+      - ca-certificates
+      - gnupg
+      - git
+      - nginx
+      - ufw
+      - build-essential
+      - python3-apt
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Download NodeSource signing key for Node.js 22 LTS
+  ansible.builtin.get_url:
+    url: https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
+    dest: /usr/share/keyrings/nodesource-repo.asc
+    mode: '0644'
+
+- name: Add NodeSource Node.js 22 LTS APT repository
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/usr/share/keyrings/nodesource-repo.asc] https://deb.nodesource.com/node_22.x nodistro main"
+    filename: nodesource
+    state: present
+    update_cache: true
+
+- name: Install Node.js 22 and NPM
+  ansible.builtin.apt:
+    name: nodejs
+    state: present
+
+- name: Create unprivileged TravelMemory service account
+  ansible.builtin.user:
+    name: "{{ app_user }}"
+    home: /var/lib/travelmemory
+    shell: /bin/bash
+    create_home: true
+    password_lock: true
+    system: true
+    state: present
+
+- name: Create TravelMemory application directory
+  ansible.builtin.file:
+    path: "{{ application_base }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_user }}"
+    mode: '0755'
+
+- name: Clone or update official TravelMemory application
+  ansible.builtin.git:
+    repo: "{{ application_repo }}"
+    dest: "{{ application_base }}"
+    version: "{{ application_git_version }}"
+    update: true
+    force: false
+  become_user: "{{ app_user }}"
+  register: app_checkout
+
+- name: Ensure writable backend uploads directory exists
+  ansible.builtin.file:
+    path: "{{ application_base }}/backend/uploads"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_user }}"
+    mode: '0750'
+
+- name: Prepare backend environment directory
+  ansible.builtin.file:
+    path: /etc/travelmemory
+    state: directory
+    owner: root
+    group: "{{ app_user }}"
+    mode: '0750'
+
+- name: Create protected backend environment (MongoDB password hidden)
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/templates/backend.env.j2"
+    dest: /etc/travelmemory/backend.env
+    owner: root
+    group: "{{ app_user }}"
+    mode: '0640'
+  notify: Restart TravelMemory backend
+  no_log: true
+
+- name: Write frontend build-time API URL (same host via Nginx)
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/templates/frontend.env.production.j2"
+    dest: "{{ application_base }}/frontend/.env.production"
+    owner: "{{ app_user }}"
+    group: "{{ app_user }}"
+    mode: '0644'
+  register: frontend_environment
+
+- name: Check backend lockfile
+  ansible.builtin.stat:
+    path: "{{ application_base }}/backend/package-lock.json"
+  register: backend_lock
+
+- name: Check backend dependency directory
+  ansible.builtin.stat:
+    path: "{{ application_base }}/backend/node_modules"
+  register: backend_modules
+
+- name: Install backend dependencies from package lockfile
+  ansible.builtin.command: npm ci --omit=dev --no-audit --no-fund
+  args:
+    chdir: "{{ application_base }}/backend"
+  become_user: "{{ app_user }}"
+  when: backend_lock.stat.exists and (app_checkout.changed or not backend_modules.stat.exists)
+
+- name: Install backend dependencies if upstream lockfile is absent
+  ansible.builtin.command: npm install --omit=dev --no-audit --no-fund
+  args:
+    chdir: "{{ application_base }}/backend"
+  become_user: "{{ app_user }}"
+  when: not backend_lock.stat.exists and (app_checkout.changed or not backend_modules.stat.exists)
+
+- name: Check frontend lockfile
+  ansible.builtin.stat:
+    path: "{{ application_base }}/frontend/package-lock.json"
+  register: frontend_lock
+
+- name: Check frontend dependency directory
+  ansible.builtin.stat:
+    path: "{{ application_base }}/frontend/node_modules"
+  register: frontend_modules
+
+- name: Install frontend dependencies from lockfile
+  ansible.builtin.command: npm ci --no-audit --no-fund
+  args:
+    chdir: "{{ application_base }}/frontend"
+  become_user: "{{ app_user }}"
+  when: frontend_lock.stat.exists and (app_checkout.changed or not frontend_modules.stat.exists)
+  register: frontend_npm_ci
+
+- name: Install frontend dependencies when lockfile is absent
+  ansible.builtin.command: npm install --no-audit --no-fund
+  args:
+    chdir: "{{ application_base }}/frontend"
+  become_user: "{{ app_user }}"
+  when: not frontend_lock.stat.exists and (app_checkout.changed or not frontend_modules.stat.exists)
+  register: frontend_npm_install
+
+- name: Check frontend production build
+  ansible.builtin.stat:
+    path: "{{ application_base }}/frontend/build/index.html"
+  register: frontend_built
+
+- name: Build optimized React frontend
+  ansible.builtin.command: npm run build
+  args:
+    chdir: "{{ application_base }}/frontend"
+  become_user: "{{ app_user }}"
+  environment:
+    NODE_OPTIONS: "--openssl-legacy-provider"
+  when: app_checkout.changed or frontend_environment.changed or frontend_npm_ci.changed or frontend_npm_install.changed or not frontend_built.stat.exists
+
+- name: Deploy dedicated systemd service for Node backend
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/templates/travelmemory.service.j2"
+    dest: /etc/systemd/system/travelmemory.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart TravelMemory backend
+
+- name: Start and enable backend service
+  ansible.builtin.systemd_service:
+    name: travelmemory
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Deploy Nginx configuration for React and API proxy
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/templates/nginx-travelmemory.conf.j2"
+    dest: /etc/nginx/sites-available/travelmemory
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload Nginx
+
+- name: Enable TravelMemory Nginx site
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/travelmemory
+    dest: /etc/nginx/sites-enabled/travelmemory
+    state: link
+  notify: Reload Nginx
+
+- name: Remove default Nginx site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: Reload Nginx
+
+- name: Validate Nginx configuration
+  ansible.builtin.command: nginx -t
+  changed_when: false
+
+- name: Ensure Nginx is running and enabled
+  ansible.builtin.service:
+    name: nginx
+    enabled: true
+    state: started
+
+- name: Reject unsolicited web-server inbound traffic
+  community.general.ufw:
+    direction: incoming
+    policy: deny
+
+- name: Allow all web-server outbound traffic
+  community.general.ufw:
+    direction: outgoing
+    policy: allow
+
+- name: Permit SSH only from learner public CIDR
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: '22'
+    from_ip: "{{ allowed_ssh_cidr }}"
+
+- name: Permit public HTTP to Nginx
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: '80'
+
+- name: Enable web host firewall
+  community.general.ufw:
+    state: enabled
+
+- name: Harden SSH on the public web server
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/10-travelmemory-hardening.conf
+    content: |
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PubkeyAuthentication yes
+      X11Forwarding no
+      AllowTcpForwarding yes
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload SSH server
+
+- name: Validate web sshd configuration
+  ansible.builtin.command: /usr/sbin/sshd -t
+  changed_when: false
+
+- name: Apply backend and Nginx service updates
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify application HTTP health from web host
+  ansible.builtin.uri:
+    url: "http://127.0.0.1/health"
+    method: GET
+    status_code: 200
+    return_content: true
+  register: web_health
+  retries: 10
+  delay: 3
+  until: web_health.status == 200
+  changed_when: false

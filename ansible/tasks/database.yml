@@ -1,0 +1,215 @@
+---
+- name: Install prerequisites for MongoDB
+  ansible.builtin.apt:
+    name:
+      - curl
+      - ca-certificates
+      - gnupg
+      - python3-apt
+      - ufw
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Fetch MongoDB 8.0 repository signing key
+  ansible.builtin.get_url:
+    url: https://pgp.mongodb.com/server-8.0.asc
+    dest: /tmp/mongodb-server-8.0.asc
+    mode: '0644'
+
+- name: Install MongoDB signing keyring
+  ansible.builtin.command:
+    argv:
+      - gpg
+      - --batch
+      - --dearmor
+      - --output
+      - /usr/share/keyrings/mongodb-server-8.0.gpg
+      - /tmp/mongodb-server-8.0.asc
+    creates: /usr/share/keyrings/mongodb-server-8.0.gpg
+
+- name: Add official MongoDB 8.0 APT repository for Ubuntu 24.04
+  ansible.builtin.apt_repository:
+    repo: "deb [arch=amd64 signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg] https://repo.mongodb.org/apt/ubuntu noble/mongodb-org/8.0 multiverse"
+    filename: mongodb-org-8.0
+    state: present
+    update_cache: true
+
+- name: Install MongoDB Community and mongosh
+  ansible.builtin.apt:
+    name:
+      - mongodb-org
+      - mongodb-mongosh
+    state: present
+
+- name: Start and enable MongoDB before initializing users
+  ansible.builtin.service:
+    name: mongod
+    state: started
+    enabled: true
+
+- name: Check whether MongoDB administrator authentication succeeds
+  ansible.builtin.command:
+    argv:
+      - mongosh
+      - --quiet
+      - --host
+      - 127.0.0.1
+      - --username
+      - "{{ mongo_admin_user }}"
+      - --password
+      - "{{ mongo_admin_password }}"
+      - --authenticationDatabase
+      - admin
+      - --eval
+      - "db.adminCommand({ping:1}).ok"
+  register: admin_auth_probe
+  failed_when: false
+  changed_when: false
+  no_log: true
+
+- name: Check whether MongoDB application user authentication succeeds
+  ansible.builtin.command:
+    argv:
+      - mongosh
+      - --quiet
+      - --host
+      - 127.0.0.1
+      - --username
+      - "{{ mongo_app_user }}"
+      - --password
+      - "{{ mongo_app_password }}"
+      - --authenticationDatabase
+      - "{{ mongo_db_name }}"
+      - --eval
+      - "db.getSiblingDB('{{ mongo_db_name }}').runCommand({ping:1}).ok"
+  register: app_auth_probe
+  failed_when: false
+  changed_when: false
+  no_log: true
+
+- name: Bootstrap missing MongoDB users without exposing credentials
+  when: admin_auth_probe.rc != 0 or app_auth_probe.rc != 0
+  block:
+    - name: Install short-lived MongoDB user creation script in /run
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/templates/mongodb_users.js.j2"
+        dest: /run/travelmemory-users.js
+        owner: root
+        group: root
+        mode: '0600'
+      no_log: true
+
+    - name: Create administrator and app user on initial unauthenticated install
+      ansible.builtin.command:
+        argv: [mongosh, --quiet, --host, 127.0.0.1, --file, /run/travelmemory-users.js]
+      when: admin_auth_probe.rc != 0
+      no_log: true
+
+    - name: Repair missing application user with authenticated administrator
+      ansible.builtin.command:
+        argv:
+          - mongosh
+          - --quiet
+          - --host
+          - 127.0.0.1
+          - --username
+          - "{{ mongo_admin_user }}"
+          - --password
+          - "{{ mongo_admin_password }}"
+          - --authenticationDatabase
+          - admin
+          - --file
+          - /run/travelmemory-users.js
+      when: admin_auth_probe.rc == 0 and app_auth_probe.rc != 0
+      no_log: true
+  always:
+    - name: Securely remove temporary MongoDB user creation script
+      ansible.builtin.file:
+        path: /run/travelmemory-users.js
+        state: absent
+      no_log: true
+
+- name: Listen on loopback and private EC2 address only
+  ansible.builtin.lineinfile:
+    path: /etc/mongod.conf
+    regexp: '^\s*bindIp:'
+    line: "  bindIp: 127.0.0.1,{{ private_ip }}"
+  notify: Restart MongoDB
+
+- name: Enable MongoDB role-based access control
+  ansible.builtin.blockinfile:
+    path: /etc/mongod.conf
+    marker: '# {mark} ANSIBLE MANAGED MONGODB AUTH'
+    block: |
+      security:
+        authorization: enabled
+  notify: Restart MongoDB
+
+- name: Reject unsolicited connections by default
+  community.general.ufw:
+    direction: incoming
+    policy: deny
+
+- name: Allow all outbound traffic from DB through the NAT Gateway
+  community.general.ufw:
+    direction: outgoing
+    policy: allow
+
+- name: Allow SSH to the private DB only from the web server private IP
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: '22'
+    from_ip: "{{ hostvars[groups['web'][0]].private_ip }}"
+
+- name: Allow MongoDB traffic only from the web server private IP
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: '27017'
+    from_ip: "{{ hostvars[groups['web'][0]].private_ip }}"
+
+- name: Enable database host firewall
+  community.general.ufw:
+    state: enabled
+
+- name: Harden SSH on private database server
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/10-travelmemory-hardening.conf
+    content: |
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PubkeyAuthentication yes
+      X11Forwarding no
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload SSH server
+
+- name: Validate private database sshd configuration
+  ansible.builtin.command: /usr/sbin/sshd -t
+  changed_when: false
+
+- name: Apply any pending MongoDB security configuration changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Confirm database accepts a local authenticated ping
+  ansible.builtin.command:
+    argv:
+      - mongosh
+      - --quiet
+      - --host
+      - 127.0.0.1
+      - --username
+      - "{{ mongo_app_user }}"
+      - --password
+      - "{{ mongo_app_password }}"
+      - --authenticationDatabase
+      - "{{ mongo_db_name }}"
+      - --eval
+      - "db.runCommand({ping:1}).ok"
+  register: db_ping
+  changed_when: false
+  no_log: true

@@ -1,0 +1,5 @@
+Hero Vired Graded Assignment: Deploying a MERN Application through Terraform and Ansible
+
+GitHub repository link: https://github.com/YOUR-USERNAME/YOUR-REPOSITORY
+
+Note: Replace the placeholder link with the ACTUAL GitHub repository URL after pushing and verifying your files, README embedded screenshots, and evidence.

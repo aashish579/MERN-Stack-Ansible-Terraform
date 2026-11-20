@@ -1,0 +1,19 @@
+// Managed by Ansible; created temporarily under /run and deleted after use.
+const adminDb = db.getSiblingDB('admin');
+if (!adminDb.getUser({{ mongo_admin_user | to_json }})) {
+  adminDb.createUser({
+    user: {{ mongo_admin_user | to_json }},
+    pwd: {{ mongo_admin_password | to_json }},
+    roles: [{ role: 'root', db: 'admin' }]
+  });
+  print('admin user created');
+}
+const appDb = db.getSiblingDB({{ mongo_db_name | to_json }});
+if (!appDb.getUser({{ mongo_app_user | to_json }})) {
+  appDb.createUser({
+    user: {{ mongo_app_user | to_json }},
+    pwd: {{ mongo_app_password | to_json }},
+    roles: [{ role: 'readWrite', db: {{ mongo_db_name | to_json }} }]
+  });
+  print('application user created');
+}

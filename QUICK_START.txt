@@ -1,0 +1,33 @@
+HERO VIRED — MERN TERRAFORM + ANSIBLE ASSIGNMENT KIT (WINDOWS 11 / UBUNTU WSL)
+
+STEP 1. Download this ZIP to Windows, then open Ubuntu WSL:
+  cd ~/mern-terraform-ansible
+  explorer.exe .
+Copy the downloaded ZIP from Windows Downloads into the window that opens.
+
+STEP 2. Unzip inside Ubuntu:
+  cd ~/mern-terraform-ansible
+  unzip -o MERN_Terraform_Ansible_Assignment_Kit.zip
+  cd MERN_Terraform_Ansible_Kit
+  pwd
+  ls -la
+
+STEP 3. Select your working Hero Vired AWS profile:
+  export AWS_PROFILE=hero-vired
+  export AWS_REGION=us-east-1
+  export AWS_DEFAULT_REGION=us-east-1
+  aws sts get-caller-identity
+
+STEP 4. Prepare your SSH key and local Terraform variables:
+  bash scripts/prepare.sh
+
+STEP 5. Only after reviewing the README, validate Terraform:
+  terraform -chdir=terraform init
+  terraform -chdir=terraform fmt
+  terraform -chdir=terraform fmt -check
+  terraform -chdir=terraform validate
+
+STOP HERE and send screenshots/output for review before terraform apply.
+
+Read README.md for the full commands and docs/SCREENSHOT_CHECKLIST.md for the 20 evidence checkpoints.
+Never share AWS access keys, passwords, Ansible Vault files or SSH private keys.

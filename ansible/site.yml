@@ -1,0 +1,43 @@
+---
+- name: Install and secure MongoDB in the private subnet
+  hosts: database
+  become: true
+  gather_facts: true
+  vars_files:
+    - ../generated/secrets.yml
+  tasks:
+    - name: Configure private database server
+      ansible.builtin.import_tasks: tasks/database.yml
+  handlers:
+    - name: Restart MongoDB
+      ansible.builtin.service:
+        name: mongod
+        state: restarted
+    - name: Reload SSH server
+      ansible.builtin.service:
+        name: ssh
+        state: reloaded
+
+- name: Install and deploy TravelMemory web application
+  hosts: web
+  become: true
+  gather_facts: true
+  vars_files:
+    - ../generated/secrets.yml
+  tasks:
+    - name: Configure public web application server
+      ansible.builtin.import_tasks: tasks/web.yml
+  handlers:
+    - name: Restart TravelMemory backend
+      ansible.builtin.systemd_service:
+        name: travelmemory
+        state: restarted
+        daemon_reload: true
+    - name: Reload Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
+    - name: Reload SSH server
+      ansible.builtin.service:
+        name: ssh
+        state: reloaded
